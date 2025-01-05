@@ -1,6 +1,14 @@
 (ns clojure.gdx.space-invaders
-  (:require [clojure.gdx :as gdx]
-            [clojure.gdx.lwjgl :refer [Application start]])
+  (:require [clojure.gdx :as gdx :refer [internal-file
+                                         sprite-batch
+                                         dispose
+                                         delta-time
+                                         clear-screen
+                                         black
+                                         begin
+                                         end]]
+            [clojure.gdx.lwjgl :refer [Application
+                                       start]])
   (:import (com.badlogic.gdx Gdx Input$Keys)
            (com.badlogic.gdx.graphics OrthographicCamera)
            (com.badlogic.gdx.graphics Texture)
@@ -11,40 +19,44 @@
 (def screen-height 600)
 
 (defn texture [c path]
-  (Texture. (gdx/internal-file c path)))
+  (Texture. (internal-file c path)))
 
-(defn make-player [context]
+(defn make-player [c]
   {:x (/ screen-width 2)
    :y 50
    :width 64
    :height 64
    :speed 300
-   :texture (texture context "ship/1.png")
+   :texture (texture c "ship/1.png")
    :bullets []})
 
-(defn make-alien [context x y]
+(defn make-alien [c x y]
   {:x x
    :y y
    :width 48
    :height 48
-   :texture (texture context "alien/1.png")})
+   :texture (texture c "alien/1.png")})
 
-(defn make-game-state [gdx-state]
-  (merge gdx-state
-         {:player (make-player gdx-state)
-          :aliens (for [x (range 100 700 80)
-                        y (range 400 500 60)]
-                    (make-alien gdx-state x y))
-          :bullets []
-          :batch (SpriteBatch.)
-          :camera (OrthographicCamera. screen-width screen-height)}))
+(defn game-context [c]
+  {:player (make-player c)
+   :aliens (for [x (range 100 700 80)
+                 y (range 400 500 60)]
+             (make-alien c x y))
+   :bullets []
+   :batch (sprite-batch)
+   :camera (OrthographicCamera. screen-width screen-height)}) ; 2x  camera!
 
-(defn update-player [player delta]
+(defn update-player [player delta c]
   (let [speed (:speed player)
         x (:x player)
-        move-left (if (.isKeyPressed Gdx/input Input$Keys/A) (- x (* delta speed)) x)
-        move-right (if (.isKeyPressed Gdx/input Input$Keys/D) (+ x (* delta speed)) move-left)
-        new-x (max 0 (min move-right (- screen-width (:width player))))]
+        move-left (if (key-pressed? c :a)
+                    (- x (* delta speed))
+                    x)
+        move-right (if (key-pressed? c :d)
+                     (+ x (* delta speed))
+                     move-left)
+        new-x (max 0 (min move-right
+                          (- screen-width (:width player))))]
     (assoc player :x new-x)))
 
 (defn update-bullets [bullets delta]
@@ -68,13 +80,13 @@
    []
    aliens))
 
-(defn handle-input [game-state]
-  (if (.isKeyJustPressed Gdx/input Input$Keys/SPACE)
-    (let [player (:player game-state)
+(defn handle-input [c]
+  (if (key-just-pressed? c :space)
+    (let [player (:player c)
           bullet {:x (+ (:x player) 28)
                   :y (+ (:y player) 64)}]
-      (update game-state :bullets conj bullet))
-    game-state))
+      (update c :bullets conj bullet))
+    c))
 
 (defn render-entity [batch entity]
   (.draw batch
@@ -82,51 +94,58 @@
          (float (:x entity))
          (float (:y entity))))
 
-(defn render-game [game-state]
-  (ScreenUtils/clear 0 0 0 1)
-  (let [batch (:batch game-state)
-        player (:player game-state)
-        aliens (:aliens game-state)
-        bullets (:bullets game-state)]
-    (.begin batch)
+(defn render-game [c]
+  (clear-screen black)
+  (let [batch (:batch c)
+        player (:player c)
+        aliens (:aliens c)
+        bullets (:bullets c)]
+    (begin batch)
     (render-entity batch player)
     (doseq [alien aliens]
       (render-entity batch alien))
     (doseq [bullet bullets]
       (render-entity batch
-                     {:texture (texture game-state "bullet.png")
+                     {:texture (texture c "bullet.png")
                       :x (:x bullet)
                       :y (:y bullet)}))
-    (.end batch)))
+    (end batch)))
 
-(defn update-game [game-state delta]
-  (-> game-state
+(defn update-game [c delta]
+  (-> c
       handle-input
-      (update :player update-player delta)
+      (update :player update-player delta c)
       (update :bullets update-bullets delta)
-      (update :aliens #(update-aliens % (:bullets game-state)))))
+      (update :aliens #(update-aliens % (:bullets c)))))
 
+; this is only for inspection, otherwise we could pass through Application also
+; and let-bound it there ?
 (def state (atom nil))
 
 (defn -main []
-  (start {:title "Space Invaders"
-          :width screen-width
-          :height screen-height
-          :fps 60}
-         (reify Application
-           (create [_]
-             (reset! state (make-game-state (gdx/context)))
-             (swap! state assoc :camera (OrthographicCamera. screen-width screen-height)))
+  (let [screen-width 800
+        screen-height 600]
+    (start {:title "Space Invaders"
+            :width screen-width ; TODO can I see this in ctx ?
+            :height screen-height
+            :fps 60} ; default 60 ?
+           (reify Application
+             (create [_]
+               (let [c (gdx/context)] ; pass through create ?
+                 (reset! state (merge c (game-context c))))
+               (swap! state assoc :camera (OrthographicCamera. screen-width screen-height))) ; duplicated camera
 
-           (dispose [_]
-             (doseq [texture (concat [(-> @state :player :texture)]
-                                     (map :texture (:aliens @state)))]
-               (.dispose texture)))
+             (dispose [_]
+               (let [c @state]
+                 ; global textures !
+                 (doseq [texture (concat [(-> c :player :texture)]
+                                         (map :texture (:aliens c)))]
+                   (dispose texture))))
 
-           (render [_]
-             (let [delta (.getDeltaTime Gdx/graphics)]
-               (swap! state update-game delta)
-               (render-game @state)))
+             (render [_]
+               (let [c @state]
+                 (swap! state update-game c (delta-time c))
+                 (render-game c)))
 
-           (resize [_ width height]
-             (.setToOrtho (:camera @state) false)))))
+             (resize [_ width height]
+               (.setToOrtho (:camera @state) false))))))
